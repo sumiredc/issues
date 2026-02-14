@@ -1,0 +1,68 @@
+version: '3'
+
+env:
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/issues?sslmode=disable
+
+tasks:
+  build:
+    desc: Build the server binary
+    cmds:
+      - go build -o bin/server ./cmd/server
+
+  run:
+    desc: Run the server
+    cmds:
+      - go run ./cmd/server
+
+  test:
+    desc: Run tests with race detection and coverage
+    cmds:
+      - go test -race -cover ./...
+
+  test:verbose:
+    desc: Run tests with verbose output, race detection, and coverage
+    cmds:
+      - go test -race -v -cover ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  fmt:
+    desc: Format code and organize imports
+    cmds:
+      - gofmt -w .
+      - goimports -w .
+
+  migrate:up:
+    desc: Run all pending migrations
+    cmds:
+      - migrate -path migrations -database "{{.DATABASE_URL}}" up
+
+  migrate:down:
+    desc: Rollback the last migration
+    cmds:
+      - migrate -path migrations -database "{{.DATABASE_URL}}" down
+
+  migrate:create:
+    desc: Create a new migration file
+    cmds:
+      - migrate create -ext sql -dir migrations -seq {{.CLI_ARGS}}
+
+  db:up:
+    desc: Start the PostgreSQL database
+    cmds:
+      - docker compose up -d
+
+  db:down:
+    desc: Stop the PostgreSQL database
+    cmds:
+      - docker compose down
+
+  dev:
+    desc: Start database and run the server
+    deps:
+      - db:up
+    cmds:
+      - go run ./cmd/server

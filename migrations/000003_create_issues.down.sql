@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS issues;
+DROP TYPE IF EXISTS issue_status;
