@@ -13,9 +13,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/sumire/issues/internal/config"
 	"github.com/sumire/issues/internal/handler"
+	"github.com/sumire/issues/internal/repository"
+	"github.com/sumire/issues/internal/service"
 )
 
 func main() {
@@ -30,6 +34,31 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+
+	db, err := sqlx.Connect("pgx", cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("connect database: %w", err)
+	}
+	defer db.Close()
+
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	slog.Info("database connected")
+
+	userRepo := repository.NewUserRepository(db)
+
+	authSvc := service.NewAuthService(userRepo, service.AuthConfig{
+		GoogleClientID:     cfg.GoogleClientID,
+		GoogleClientSecret: cfg.GoogleClientSecret,
+		GitHubClientID:     cfg.GitHubClientID,
+		GitHubClientSecret: cfg.GitHubClientSecret,
+		JWTSecret:          cfg.JWTSecret,
+		FrontendURL:        cfg.FrontendURL,
+	})
+
+	authHandler := handler.NewAuthHandler(authSvc)
 
 	r := chi.NewRouter()
 
@@ -51,10 +80,25 @@ func run() error {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// TODO: auth routes
-		// TODO: project routes
-		// TODO: issue routes
-		// TODO: notification routes
+		// Auth routes (public)
+		r.Route("/auth", func(r chi.Router) {
+			r.Get("/google", authHandler.GoogleRedirect)
+			r.Get("/google/callback", authHandler.GoogleCallback)
+			r.Get("/github", authHandler.GitHubRedirect)
+			r.Get("/github/callback", authHandler.GitHubCallback)
+			r.Post("/refresh", authHandler.Refresh)
+		})
+
+		// Protected routes
+		r.Group(func(r chi.Router) {
+			r.Use(handler.JWTAuth(authSvc))
+
+			r.Get("/auth/me", authHandler.Me)
+
+			// TODO: project routes
+			// TODO: issue routes
+			// TODO: notification routes
+		})
 	})
 
 	srv := &http.Server{
