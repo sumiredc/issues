@@ -1,0 +1,57 @@
+# EntropyNet - Claude Code Project Guide
+
+## Project Overview
+
+EntropyNet is a distributed protocol that guarantees data "forgetting" rather than persistence. It combines client-side secret sharing (Shamir's Secret Sharing) with volatile memory management on a P2P network (DHT).
+
+## Tech Stack
+
+- **Core**: Rust (entropynet-core) - crypto, protocol, in-memory store
+- **Networking**: libp2p (entropynet-net) - TCP/QUIC, WebRTC/WebTransport
+- **Browser SDK**: Wasm (entropynet-wasm) - JavaScript/TypeScript wrapper
+- **Signaling**: WebSocket
+
+## Project Structure
+
+```
+.claude/           # Claude Code configuration
+  commands/        # Slash commands (/plan, /tdd, /code-review, etc.)
+  rules/           # Coding rules (common + golang)
+  settings.json    # Hooks configuration
+agents/            # Specialized subagents (planner, architect, reviewer, etc.)
+skills/            # Workflow definitions and domain knowledge
+scripts/           # Hook scripts (session management, formatting, etc.)
+contexts/          # Context files for different workflows
+```
+
+## Agents
+
+Available agents in `agents/`:
+- `planner.md` - Feature implementation planning
+- `architect.md` - System design decisions
+- `tdd-guide.md` - Test-driven development
+- `code-reviewer.md` - Quality and security review
+- `security-reviewer.md` - Vulnerability analysis
+- `build-error-resolver.md` - Build error resolution
+- `go-reviewer.md` - Go code review
+- `go-build-resolver.md` - Go build error resolution
+
+## Key Commands
+
+- `/plan` - Implementation planning
+- `/tdd` - Test-driven development workflow
+- `/code-review` - Code quality review
+- `/build-fix` - Fix build errors
+- `/go-review` - Go code review
+- `/go-test` - Go TDD workflow
+- `/go-build` - Fix Go build errors
+- `/verify` - Run verification loop
+- `/checkpoint` - Save verification state
+
+## Development Guidelines
+
+- Follow rules in `.claude/rules/common/` and `.claude/rules/golang/`
+- Use TDD approach where applicable
+- Security is critical - this is a cryptographic protocol
+- All crypto operations must be reviewed for correctness
+- P2P networking code must handle adversarial conditions

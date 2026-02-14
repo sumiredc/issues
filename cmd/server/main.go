@@ -10,12 +10,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/sumire/issues/internal/config"
 	"github.com/sumire/issues/internal/handler"
+	"github.com/sumire/issues/internal/repository"
+	"github.com/sumire/issues/internal/service"
 )
 
 func main() {
@@ -31,62 +34,89 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	r := chi.NewRouter()
+	db, err := sqlx.Connect("pgx", cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("connect database: %w", err)
+	}
+	defer db.Close()
 
-	r.Use(handler.RequestID)
-	r.Use(handler.Logger)
-	r.Use(handler.Recover)
-	r.Use(middleware.RealIP)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{cfg.FrontendURL},
-		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		ExposedHeaders:   []string{"X-Request-ID"},
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	slog.Info("database connected")
+
+	userRepo := repository.NewUserRepository(db)
+
+	authSvc := service.NewAuthService(userRepo, service.AuthConfig{
+		GoogleClientID:     cfg.GoogleClientID,
+		GoogleClientSecret: cfg.GoogleClientSecret,
+		GitHubClientID:     cfg.GitHubClientID,
+		GitHubClientSecret: cfg.GitHubClientSecret,
+		JWTSecret:          cfg.JWTSecret,
+		FrontendURL:        cfg.FrontendURL,
+	})
+
+	authHandler := handler.NewAuthHandler(authSvc)
+
+	e := echo.New()
+	e.HideBanner = true
+	e.Validator = handler.NewAppValidator()
+	e.HTTPErrorHandler = handler.HTTPErrorHandler
+
+	e.Use(middleware.RequestID())
+	e.Use(handler.RequestLogger())
+	e.Use(middleware.Recover())
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins:     []string{cfg.FrontendURL},
+		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		AllowHeaders:     []string{"Accept", "Authorization", "Content-Type"},
+		ExposeHeaders:    []string{echo.HeaderXRequestID},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
 
-	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		handler.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	e.GET("/health", func(c echo.Context) error {
+		return handler.JSON(c, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	r.Route("/api/v1", func(r chi.Router) {
-		// TODO: auth routes
-		// TODO: project routes
-		// TODO: issue routes
-		// TODO: notification routes
-	})
+	v1 := e.Group("/api/v1")
 
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      r,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	// Auth routes (public)
+	auth := v1.Group("/auth")
+	auth.GET("/google", authHandler.GoogleRedirect)
+	auth.GET("/google/callback", authHandler.GoogleCallback)
+	auth.GET("/github", authHandler.GitHubRedirect)
+	auth.GET("/github/callback", authHandler.GitHubCallback)
+	auth.POST("/refresh", authHandler.Refresh)
 
-	errCh := make(chan error, 1)
+	// Protected routes
+	protected := v1.Group("")
+	protected.Use(handler.JWTAuth(authSvc))
+
+	protected.GET("/auth/me", authHandler.Me)
+
+	// TODO: project routes
+	// TODO: issue routes
+	// TODO: notification routes
+
 	go func() {
 		slog.Info("server starting", "port", cfg.Port)
-		errCh <- srv.ListenAndServe()
+		if err := e.Start(fmt.Sprintf(":%d", cfg.Port)); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	select {
-	case sig := <-quit:
-		slog.Info("shutdown signal received", "signal", sig)
-	case err := <-errCh:
-		if err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("server error: %w", err)
-		}
-	}
+	slog.Info("shutdown signal received")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := e.Shutdown(ctx); err != nil {
 		return fmt.Errorf("server shutdown: %w", err)
 	}
 
