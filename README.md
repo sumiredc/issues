@@ -14,7 +14,7 @@ Issues は、GitHub のような Issue 管理機能を提供するアプリケ�
 
 ### 1.2 全体アーキテクチャ
 
-- **Backend**: Go（chi router, pgx/sqlx, JWT 認証）
+- **Backend**: Go（echo framework, pgx/sqlx, JWT 認証）
 - **Frontend Web**: React + TypeScript + Vite + Tailwind CSS
 - **Frontend Mobile**: React Native + Expo
 - **Database**: PostgreSQL
@@ -89,7 +89,7 @@ Issues は、GitHub のような Issue 管理機能を提供するアプリケ�
 
 | 領域 | 技術 | 選定理由 |
 |------|------|---------|
-| Backend | Go + chi | 高パフォーマンス、stdlib 互換ルーター |
+| Backend | Go + echo | 高パフォーマンス、組み込みバインド/バリデーション/ミドルウェア |
 | DB Driver | pgx + sqlx | Pure Go PostgreSQL ドライバ、構造体スキャン |
 | Migration | golang-migrate | CLI + Go API 対応 |
 | Auth | golang-jwt + x/oauth2 | JWT 標準ライブラリ + 公式 OAuth2 |

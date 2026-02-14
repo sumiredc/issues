@@ -3,10 +3,10 @@ package handler
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+
+	"github.com/labstack/echo/v4"
 
 	"github.com/sumire/issues/internal/domain"
 	"github.com/sumire/issues/internal/service"
@@ -23,9 +23,9 @@ func NewAuthHandler(auth *service.AuthService) *AuthHandler {
 }
 
 // GoogleRedirect redirects the user to Google's OAuth consent page.
-func (h *AuthHandler) GoogleRedirect(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) GoogleRedirect(c echo.Context) error {
 	state := generateState()
-	http.SetCookie(w, &http.Cookie{
+	c.SetCookie(&http.Cookie{
 		Name:     "oauth_state",
 		Value:    state,
 		Path:     "/",
@@ -33,38 +33,35 @@ func (h *AuthHandler) GoogleRedirect(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
-	http.Redirect(w, r, h.auth.GoogleAuthURL(state), http.StatusTemporaryRedirect)
+	return c.Redirect(http.StatusTemporaryRedirect, h.auth.GoogleAuthURL(state))
 }
 
 // GoogleCallback handles the OAuth callback from Google.
-func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
-	if err := validateOAuthState(r); err != nil {
-		WriteError(w, fmt.Errorf("%w: %v", domain.ErrInvalidInput, err))
-		return
+func (h *AuthHandler) GoogleCallback(c echo.Context) error {
+	if err := validateOAuthState(c); err != nil {
+		return fmt.Errorf("%w: %v", domain.ErrInvalidInput, err)
 	}
 
-	code := r.URL.Query().Get("code")
+	code := c.QueryParam("code")
 	if code == "" {
-		WriteError(w, fmt.Errorf("%w: missing code parameter", domain.ErrInvalidInput))
-		return
+		return fmt.Errorf("%w: missing code parameter", domain.ErrInvalidInput)
 	}
 
-	user, tokens, err := h.auth.GoogleCallback(r.Context(), code)
+	user, tokens, err := h.auth.GoogleCallback(c.Request().Context(), code)
 	if err != nil {
-		WriteError(w, err)
-		return
+		return err
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{
+	return JSON(c, http.StatusOK, map[string]any{
 		"user":   user,
 		"tokens": tokens,
 	})
 }
 
 // GitHubRedirect redirects the user to GitHub's OAuth consent page.
-func (h *AuthHandler) GitHubRedirect(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) GitHubRedirect(c echo.Context) error {
 	state := generateState()
-	http.SetCookie(w, &http.Cookie{
+	c.SetCookie(&http.Cookie{
 		Name:     "oauth_state",
 		Value:    state,
 		Path:     "/",
@@ -72,101 +69,67 @@ func (h *AuthHandler) GitHubRedirect(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
-	http.Redirect(w, r, h.auth.GitHubAuthURL(state), http.StatusTemporaryRedirect)
+	return c.Redirect(http.StatusTemporaryRedirect, h.auth.GitHubAuthURL(state))
 }
 
 // GitHubCallback handles the OAuth callback from GitHub.
-func (h *AuthHandler) GitHubCallback(w http.ResponseWriter, r *http.Request) {
-	if err := validateOAuthState(r); err != nil {
-		WriteError(w, fmt.Errorf("%w: %v", domain.ErrInvalidInput, err))
-		return
+func (h *AuthHandler) GitHubCallback(c echo.Context) error {
+	if err := validateOAuthState(c); err != nil {
+		return fmt.Errorf("%w: %v", domain.ErrInvalidInput, err)
 	}
 
-	code := r.URL.Query().Get("code")
+	code := c.QueryParam("code")
 	if code == "" {
-		WriteError(w, fmt.Errorf("%w: missing code parameter", domain.ErrInvalidInput))
-		return
+		return fmt.Errorf("%w: missing code parameter", domain.ErrInvalidInput)
 	}
 
-	user, tokens, err := h.auth.GitHubCallback(r.Context(), code)
+	user, tokens, err := h.auth.GitHubCallback(c.Request().Context(), code)
 	if err != nil {
-		WriteError(w, err)
-		return
+		return err
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]any{
+	return JSON(c, http.StatusOK, map[string]any{
 		"user":   user,
 		"tokens": tokens,
 	})
 }
 
 // Me returns the currently authenticated user.
-func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
-	userID, ok := GetUserID(r.Context())
+func (h *AuthHandler) Me(c echo.Context) error {
+	userID, ok := GetUserID(c)
 	if !ok {
-		WriteError(w, domain.ErrUnauthorized)
-		return
+		return domain.ErrUnauthorized
 	}
 
-	user, err := h.auth.GetUser(r.Context(), userID)
+	user, err := h.auth.GetUser(c.Request().Context(), userID)
 	if err != nil {
-		WriteError(w, err)
-		return
+		return err
 	}
 
-	WriteJSON(w, http.StatusOK, user)
+	return JSON(c, http.StatusOK, user)
+}
+
+// refreshRequest is the request body for token refresh.
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token" validate:"required"`
 }
 
 // Refresh generates a new token pair from a refresh token.
-func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		RefreshToken string `json:"refresh_token"`
+func (h *AuthHandler) Refresh(c echo.Context) error {
+	var body refreshRequest
+	if err := c.Bind(&body); err != nil {
+		return fmt.Errorf("%w: invalid request body", domain.ErrInvalidInput)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		WriteError(w, fmt.Errorf("%w: invalid request body", domain.ErrInvalidInput))
-		return
-	}
-
-	if body.RefreshToken == "" {
-		WriteError(w, fmt.Errorf("%w: refresh_token is required", domain.ErrInvalidInput))
-		return
+	if err := c.Validate(body); err != nil {
+		return err
 	}
 
 	tokens, err := h.auth.RefreshAccessToken(body.RefreshToken)
 	if err != nil {
-		WriteError(w, err)
-		return
+		return err
 	}
 
-	WriteJSON(w, http.StatusOK, tokens)
-}
-
-// JWTAuth is middleware that validates the JWT Bearer token and injects the user ID into context.
-func JWTAuth(auth *service.AuthService) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			header := r.Header.Get("Authorization")
-			if header == "" {
-				WriteError(w, domain.ErrUnauthorized)
-				return
-			}
-
-			parts := strings.SplitN(header, " ", 2)
-			if len(parts) != 2 || parts[0] != "Bearer" {
-				WriteError(w, domain.ErrUnauthorized)
-				return
-			}
-
-			userID, err := auth.ValidateToken(parts[1])
-			if err != nil {
-				WriteError(w, domain.ErrUnauthorized)
-				return
-			}
-
-			ctx := SetUserID(r.Context(), userID)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
+	return JSON(c, http.StatusOK, tokens)
 }
 
 func generateState() string {
@@ -177,13 +140,13 @@ func generateState() string {
 	return base64.URLEncoding.EncodeToString(b)
 }
 
-func validateOAuthState(r *http.Request) error {
-	cookie, err := r.Cookie("oauth_state")
+func validateOAuthState(c echo.Context) error {
+	cookie, err := c.Cookie("oauth_state")
 	if err != nil {
 		return fmt.Errorf("missing oauth_state cookie")
 	}
 
-	queryState := r.URL.Query().Get("state")
+	queryState := c.QueryParam("state")
 	if queryState == "" || queryState != cookie.Value {
 		return fmt.Errorf("state mismatch")
 	}

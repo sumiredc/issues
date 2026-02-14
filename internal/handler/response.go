@@ -1,19 +1,20 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+
+	"github.com/labstack/echo/v4"
 
 	"github.com/sumire/issues/internal/domain"
 )
 
 // Envelope is the standard API response wrapper.
 type Envelope struct {
-	Data  any            `json:"data,omitempty"`
+	Data  any             `json:"data,omitempty"`
 	Meta  *PaginationMeta `json:"meta,omitempty"`
-	Error *APIError      `json:"error,omitempty"`
+	Error *APIError       `json:"error,omitempty"`
 }
 
 // PaginationMeta holds cursor-based pagination info.
@@ -24,9 +25,9 @@ type PaginationMeta struct {
 
 // APIError represents an error in the API response.
 type APIError struct {
-	Code    string        `json:"code"`
-	Message string        `json:"message"`
-	Details []FieldError  `json:"details,omitempty"`
+	Code    string       `json:"code"`
+	Message string       `json:"message"`
+	Details []FieldError `json:"details,omitempty"`
 }
 
 // FieldError represents a field-level validation error.
@@ -35,38 +36,42 @@ type FieldError struct {
 	Message string `json:"message"`
 }
 
-// WriteJSON writes a JSON response with the given status code.
-func WriteJSON(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(Envelope{Data: data}); err != nil {
-		slog.Error("failed to encode response", "error", err)
-	}
+// JSON writes a JSON response with the standard envelope.
+func JSON(c echo.Context, status int, data any) error {
+	return c.JSON(status, Envelope{Data: data})
 }
 
-// WriteJSONList writes a paginated JSON list response.
-func WriteJSONList(w http.ResponseWriter, status int, data any, meta PaginationMeta) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(Envelope{Data: data, Meta: &meta}); err != nil {
-		slog.Error("failed to encode response", "error", err)
-	}
+// JSONList writes a paginated JSON list response.
+func JSONList(c echo.Context, status int, data any, meta PaginationMeta) error {
+	return c.JSON(status, Envelope{Data: data, Meta: &meta})
 }
 
-// WriteError maps domain errors to HTTP responses and writes them.
-func WriteError(w http.ResponseWriter, err error) {
+// HTTPErrorHandler is the global error handler for echo.
+func HTTPErrorHandler(err error, c echo.Context) {
+	if c.Response().Committed {
+		return
+	}
+
 	status, apiErr := mapError(err)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if encErr := json.NewEncoder(w).Encode(Envelope{Error: &apiErr}); encErr != nil {
-		slog.Error("failed to encode error response", "error", encErr)
+	if jsonErr := c.JSON(status, Envelope{Error: &apiErr}); jsonErr != nil {
+		slog.Error("failed to send error response", "error", jsonErr)
 	}
 }
 
 func mapError(err error) (int, APIError) {
+	// Handle echo's own HTTP errors (404, 405, etc.)
+	var echoErr *echo.HTTPError
+	if errors.As(err, &echoErr) {
+		msg, _ := echoErr.Message.(string)
+		if msg == "" {
+			msg = http.StatusText(echoErr.Code)
+		}
+		return echoErr.Code, APIError{
+			Code:    http.StatusText(echoErr.Code),
+			Message: msg,
+		}
+	}
+
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		return http.StatusNotFound, APIError{

@@ -6,7 +6,7 @@ AI-powered issue management system. When an issue is opened, Claude Code automat
 
 ## Tech Stack
 
-- **Backend**: Go (chi, pgx/sqlx, golang-jwt, x/oauth2)
+- **Backend**: Go (echo, pgx/sqlx, golang-jwt, x/oauth2)
 - **Frontend Web**: React + TypeScript + Vite + Tailwind CSS
 - **Frontend Mobile**: React Native + Expo
 - **Database**: PostgreSQL 16

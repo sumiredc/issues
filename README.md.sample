@@ -1,0 +1,119 @@
+# EntropyNet システム設計書 (Draft v1.0)
+## 1. システム概要
+EntropyNet は、情報の「永続性」ではなく「忘却」を保証する分散型プロトコルである。 クライアントサイドでの秘密分散（Shamir's Secret Sharing）と、P2Pネットワーク（DHT）上の揮発性メモリ管理を組み合わせることで、「一定時間経過、またはアクセス検知により、復号鍵が物理的に消滅する」 仕組みを提供する。
+
+### 1.1 全体アーキテクチャ
+システムは「ハイブリッドP2P構成」を採用する。
+- Client (SDK/Browser): ユーザーのブラウザ。Wasmで動作。データの暗号化、鍵の分割・復元を行う。短命なP2Pノードとして振る舞う。
+- Super Node (Server): 運営（あなた）またはボランティアが運用する常時稼働サーバー（Linux/Rust）。DHTの安定性を維持し、鍵の欠片（Shard）を一時保管する。
+- Signaling Server: ブラウザ同士（WebRTC）の接続を仲介する軽量なサーバー。データそのものは通過させない。
+- Blob Storage: 暗号化されたデータ本体（Payload）を置く場所。IPFS、またはAWS S3（ライフサイクル設定付き）を利用。
+
+## 2. データフロー設計
+### 2.1 アップロード（鍵の分散）プロセス
+1. 暗号化 (Client):
+    - 送信データ $D$ に対し、ランダムな共通鍵 $K$ と初期化ベクトル $IV$ を生成。
+    - AES-256-GCM で暗号化: $E = Encrypt(D, K, IV)$
+2. 秘密分散 (Client):
+    - 共通鍵 $K$ を シャミアの秘密分散法により $N$ 個のシェア（欠片） $S_1, S_2, ..., S_N$ に分割。
+    - 復元閾値 $T$ を設定（例: 20個に分割し、10個で復元可能）。
+3. メタデータ付与 (Client):
+    - 各シェア $S_i$ に「消滅条件（TTL / Access Limit）」を付与。
+4. 分散保管 (P2P Network):
+    - Kademlia DHT を使用し、ネットワーク上のノードに対して STORE(Key_Hash, S_i) を要求。
+    - 各ノードは $S_i$ を RAM（揮発性メモリ）にのみ 保存し、ディスクには書き込まない。
+5. Payload保管:
+    - 暗号化データ $E$ を Blob Storage にアップロードし、そのURLを取得。
+6. Magic Link生成:
+    - https://entropynet.io/#<Key_Hash>.<IV>.<Blob_URL> 形式のURLを生成し、ユーザーに提示。
+
+### 2.2 ダウンロード（鍵の復元・消滅）プロセス
+1. 探索 (Client):
+    - URLから Key_Hash を取得。DHTネットワークに対し FIND_VALUE(Key_Hash) をブロードキャスト。
+2. 収集 (P2P Network):
+    - 該当するシェアを持つノードたちが応答。Clientは $T$ 個以上のシェアを集める。
+3. 自己崩壊トリガー (Node):
+    - シェアを提供したノードは、メタデータの「Access Limit: 1」を確認し、即座に該当シェアをメモリから削除（unset）する。
+4. 復元と復号 (Client):
+    - 集めたシェアから共通鍵 $K$ を数学的に合成。
+    - Blob Storage から $E$ を取得し、復号して表示。
+
+## 3. コンポーネント詳細仕様
+### 3.1 Core Library (entropynet-core)
+プラットフォーム非依存（Rust）で実装し、サーバー・ブラウザ共通で使用する。
+- 言語: Rust
+- 主なモジュール:
+    - crypto: AES-GCM, Shamir's Secret Sharing (GF(2^8))
+    - protocol: 独自ワイヤープロトコル（Protocol Buffers または CBORを使用）
+    - store: インメモリKVS（TTL機能付き HashMap）
+
+### 3.2 Network Layer (entropynet-net)
+libp2p をラップし、通信を抽象化する。
+- 使用ライブラリ: rust-libp2p
+- Transports:
+    - TCP/QUIC: サーバー間通信用
+    - WebRTC / WebTransport: ブラウザ・サーバー間通信用
+- Discovery: Kademlia DHT, mDNS (ローカル探索)
+- Identify: ノードのバージョン確認（悪意ある改造クライアントの排除用ロジック含む）
+
+### 3.3 Browser SDK (entropynet-wasm)
+JavaScript/TypeScript から利用するためのラッパー。
+```ts
+// SDK Interface Draft
+
+interface UploadOptions {
+  ttlSeconds: number; // 時間制限
+  readLimit: number;  // 回数制限 (基本は1)
+  threshold: number;  // 復元に必要なシェア数
+}
+
+class EntropyNet {
+  // 初期化（Wasmロード、P2Pノード起動）
+  async init(): Promise<void>;
+
+  // データを預ける -> Magic Linkを返す
+  async conceal(secret: string | Uint8Array, options: UploadOptions): Promise<string>;
+
+  // リンクからデータを復元する
+  async reveal(link: string): Promise<string | Uint8Array>;
+}
+```
+
+## 4. セキュリティ & 脅威モデル
+このシステムが「何を保証し、何を保証しないか」の定義。
+
+### 4.1 保証するもの (Security Guarantees)
+- Perfect Forward Secrecy (PFS): 鍵が消滅した後、過去の通信を傍受していた攻撃者が暗号文を解読することは不可能。
+- Trustless Deletion: 中央管理者が不在でも、確率的にデータはアクセス不能になる。
+
+### 4.2 対策済み脅威
+- Sybil攻撃（大量の偽ノード作成）:
+    - 対策: IPアドレスごとの接続制限、およびPoW（Proof of Work）をID生成時に要求し、ID生成コストを上げる。
+- Honest-but-Curious（好奇心旺盛なノード）:
+    - 対策: 1つのノードは「鍵の欠片」しか持たないため、単独では元の情報を推測すらできない。
+
+## 5. 開発スタック選定
+開発効率とパフォーマンスを両立する選定。
+
+| 領域 | 技術スタック | 選定理由 |
+| :-- | :-- | :-- |
+| コア言語 | Rust | メモリ安全性、Wasmへのコンパイル適性、libp2pの公式サポート。 |
+| P2P基盤 | libp2p | IPFS等で実績のあるデファクトスタンダード。NAT越え機能が強力。 |
+| ブラウザ | Wasm-pack | Rustをnpmパッケージとしてビルドするために必須。 |
+| Signal | WebSocket | 初期接続（Handshake）用。実装が容易。 |
+| UI | HTML | 複雑な実装が不要なため。 |
+
+## 6. 開発マイルストーン
+
+- Phase 1: Proof of Concept
+    - CLIツールのみで実装。
+    - ローカルネットワーク内で、PC AからPC Bへ「時限付き鍵」を送れることを確認。
+- Phase 2: Wasm移植とハイブリッド化
+    - RustコードをWasm化し、ブラウザでP2P通信を確立させる。
+    - WebRTC Star (Signaling) の実装。
+- Phase 3: SDK化と安定性向上
+    - npm パッケージとしての整理。
+    - DHTの接続維持（Keep-alive）ロジックの改善。
+- Phase 4: 公開とデモアプリ
+    - デモサイト bitchat.free 風のチャットアプリ、ファイル転送アプリの実装。
+    - 50ノード規模でのストレステスト。

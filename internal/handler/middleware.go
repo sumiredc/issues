@@ -1,91 +1,68 @@
 package handler
 
 import (
-	"context"
 	"log/slog"
-	"net/http"
+	"strings"
 	"time"
 
-	"github.com/google/uuid"
-)
+	"github.com/labstack/echo/v4"
 
-type contextKey string
+	"github.com/sumire/issues/internal/domain"
+	"github.com/sumire/issues/internal/service"
+)
 
 const (
-	contextKeyRequestID contextKey = "request_id"
-	contextKeyUserID    contextKey = "user_id"
+	contextKeyUserID = "user_id"
 )
 
-// RequestID adds a unique request ID to each request.
-func RequestID(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
-		if id == "" {
-			id = uuid.New().String()
+// RequestLogger logs each HTTP request with structured fields.
+func RequestLogger() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			start := time.Now()
+
+			err := next(c)
+
+			slog.Info("http request",
+				"method", c.Request().Method,
+				"path", c.Request().URL.Path,
+				"status", c.Response().Status,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"request_id", c.Response().Header().Get(echo.HeaderXRequestID),
+			)
+
+			return err
 		}
-		ctx := context.WithValue(r.Context(), contextKeyRequestID, id)
-		w.Header().Set("X-Request-ID", id)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+	}
 }
 
-// Logger logs each HTTP request with structured fields.
-func Logger(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-
-		next.ServeHTTP(sw, r)
-
-		slog.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", sw.status,
-			"duration_ms", time.Since(start).Milliseconds(),
-			"request_id", GetRequestID(r.Context()),
-		)
-	})
-}
-
-// Recover catches panics and returns a 500 response.
-func Recover(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if rvr := recover(); rvr != nil {
-				slog.Error("panic recovered",
-					"error", rvr,
-					"request_id", GetRequestID(r.Context()),
-				)
-				http.Error(w, `{"error":{"code":"internal_error","message":"An unexpected error occurred"}}`, http.StatusInternalServerError)
+// JWTAuth validates the Bearer token and injects the user ID into echo context.
+func JWTAuth(auth *service.AuthService) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			header := c.Request().Header.Get("Authorization")
+			if header == "" {
+				return domain.ErrUnauthorized
 			}
-		}()
-		next.ServeHTTP(w, r)
-	})
+
+			parts := strings.SplitN(header, " ", 2)
+			if len(parts) != 2 || parts[0] != "Bearer" {
+				return domain.ErrUnauthorized
+			}
+
+			userID, err := auth.ValidateToken(parts[1])
+			if err != nil {
+				return domain.ErrUnauthorized
+			}
+
+			c.Set(contextKeyUserID, userID)
+			return next(c)
+		}
+	}
 }
 
-// GetRequestID extracts the request ID from the context.
-func GetRequestID(ctx context.Context) string {
-	id, _ := ctx.Value(contextKeyRequestID).(string)
-	return id
-}
-
-// GetUserID extracts the authenticated user ID from the context.
-func GetUserID(ctx context.Context) (int64, bool) {
-	id, ok := ctx.Value(contextKeyUserID).(int64)
+// GetUserID extracts the authenticated user ID from echo context.
+func GetUserID(c echo.Context) (int64, bool) {
+	id, ok := c.Get(contextKeyUserID).(int64)
 	return id, ok
-}
-
-// SetUserID stores the user ID in the context.
-func SetUserID(ctx context.Context, userID int64) context.Context {
-	return context.WithValue(ctx, contextKeyUserID, userID)
-}
-
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (w *statusWriter) WriteHeader(status int) {
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
 }

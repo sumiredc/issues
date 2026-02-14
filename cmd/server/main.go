@@ -10,9 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 
@@ -60,77 +59,64 @@ func run() error {
 
 	authHandler := handler.NewAuthHandler(authSvc)
 
-	r := chi.NewRouter()
+	e := echo.New()
+	e.HideBanner = true
+	e.Validator = handler.NewAppValidator()
+	e.HTTPErrorHandler = handler.HTTPErrorHandler
 
-	r.Use(handler.RequestID)
-	r.Use(handler.Logger)
-	r.Use(handler.Recover)
-	r.Use(middleware.RealIP)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{cfg.FrontendURL},
-		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		ExposedHeaders:   []string{"X-Request-ID"},
+	e.Use(middleware.RequestID())
+	e.Use(handler.RequestLogger())
+	e.Use(middleware.Recover())
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins:     []string{cfg.FrontendURL},
+		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		AllowHeaders:     []string{"Accept", "Authorization", "Content-Type"},
+		ExposeHeaders:    []string{echo.HeaderXRequestID},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
 
-	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		handler.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	e.GET("/health", func(c echo.Context) error {
+		return handler.JSON(c, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	r.Route("/api/v1", func(r chi.Router) {
-		// Auth routes (public)
-		r.Route("/auth", func(r chi.Router) {
-			r.Get("/google", authHandler.GoogleRedirect)
-			r.Get("/google/callback", authHandler.GoogleCallback)
-			r.Get("/github", authHandler.GitHubRedirect)
-			r.Get("/github/callback", authHandler.GitHubCallback)
-			r.Post("/refresh", authHandler.Refresh)
-		})
+	v1 := e.Group("/api/v1")
 
-		// Protected routes
-		r.Group(func(r chi.Router) {
-			r.Use(handler.JWTAuth(authSvc))
+	// Auth routes (public)
+	auth := v1.Group("/auth")
+	auth.GET("/google", authHandler.GoogleRedirect)
+	auth.GET("/google/callback", authHandler.GoogleCallback)
+	auth.GET("/github", authHandler.GitHubRedirect)
+	auth.GET("/github/callback", authHandler.GitHubCallback)
+	auth.POST("/refresh", authHandler.Refresh)
 
-			r.Get("/auth/me", authHandler.Me)
+	// Protected routes
+	protected := v1.Group("")
+	protected.Use(handler.JWTAuth(authSvc))
 
-			// TODO: project routes
-			// TODO: issue routes
-			// TODO: notification routes
-		})
-	})
+	protected.GET("/auth/me", authHandler.Me)
 
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      r,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	// TODO: project routes
+	// TODO: issue routes
+	// TODO: notification routes
 
-	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("server starting", "port", cfg.Port)
-		errCh <- srv.ListenAndServe()
+		if err := e.Start(fmt.Sprintf(":%d", cfg.Port)); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	select {
-	case sig := <-quit:
-		slog.Info("shutdown signal received", "signal", sig)
-	case err := <-errCh:
-		if err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("server error: %w", err)
-		}
-	}
+	slog.Info("shutdown signal received")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := e.Shutdown(ctx); err != nil {
 		return fmt.Errorf("server shutdown: %w", err)
 	}
 
